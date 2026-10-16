@@ -1,0 +1,4 @@
+# Keep Windows launcher scripts byte-exact: the BOM is required so Windows
+# PowerShell 5.1 reads their Chinese console output as UTF-8 rather than ANSI.
+*.ps1 -text
+*.cmd -text
