@@ -145,19 +145,26 @@ function updateTrayMenu() {
   tray.setToolTip(trayTooltip(status))
 }
 
-function trayIconPath() {
-  const png = path.join(__dirname, 'build', 'icon.png')
-  const ico = path.join(__dirname, 'build', 'icon.ico')
-  if (process.platform === 'win32' && existsSync(ico)) return ico
-  return existsSync(png) ? png : ico
-}
-
 function createTray() {
   if (tray !== null && !tray.isDestroyed()) return
-  tray = new Tray(trayIconPath())
+  // The tray is a convenience, not a correctness requirement. A missing or
+  // unreadable icon must not take the whole app down, because the phone gateway
+  // is perfectly usable from the pairing window alone.
+  const icon = resolveIconPath()
+  try {
+    tray = new Tray(icon ?? undefined)
+  } catch (error) {
+    writeLog(`Tray unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    tray = null
+    return
+  }
   tray.on('double-click', showRemoteWindow)
   tray.on('click', showRemoteWindow)
-  updateTrayMenu()
+  try {
+    updateTrayMenu()
+  } catch (error) {
+    writeLog(`Tray menu failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 async function enableRemote() {
@@ -193,7 +200,7 @@ function createRemoteWindow() {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#07111f',
-    icon: path.join(__dirname, 'build', 'icon.png'),
+    icon: resolveIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'remote-preload.cjs'),
       contextIsolation: true,
@@ -208,6 +215,20 @@ function createRemoteWindow() {
   remoteWindow.once('ready-to-show', () => remoteWindow?.show())
   remoteWindow.on('closed', () => { remoteWindow = null })
   return remoteWindow.loadFile(path.join(__dirname, 'remote.html'))
+}
+
+/**
+ * Pick an icon that actually exists.
+ *
+ * Electron throws from `new BrowserWindow({icon})` when the path is missing,
+ * which turns a cosmetic problem into a failed launch. Prefer the packaged ICO
+ * on Windows and fall back to the PNG, then to no icon at all.
+ */
+function resolveIconPath() {
+  const candidates = process.platform === 'win32'
+    ? [path.join(__dirname, 'build', 'icon.ico'), path.join(__dirname, 'build', 'icon.png')]
+    : [path.join(__dirname, 'build', 'icon.png'), path.join(__dirname, 'build', 'icon.ico')]
+  return candidates.find((candidate) => existsSync(candidate)) ?? undefined
 }
 
 async function boot() {
