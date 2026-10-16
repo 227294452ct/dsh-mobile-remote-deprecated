@@ -241,10 +241,16 @@ async function boot() {
   upstreamUrl = normalizeUpstream(
     readArgument('--upstream') || process.env.DSH_UPSTREAM_URL || DEFAULT_UPSTREAM_URL
   )
+  // A permanent hostname is what stops the phone from re-pairing after a
+  // restart. Without one the gateway falls back to a quick tunnel whose address
+  // changes every launch, so it is passed in explicitly rather than left to
+  // chance.
+  const hostname = readArgument('--hostname') || process.env.DSH_TUNNEL_HOSTNAME || null
   configureSessionSecurity()
   remoteGateway = new RemoteGateway({
     userDataPath: app.getPath('userData'),
     cloudflaredPath: cloudflaredPath(),
+    hostname,
     log: writeLog,
     desktopProvider: createElectronDesktopProvider({
       desktopCapturer,
@@ -261,6 +267,13 @@ async function boot() {
   remoteGateway.on('desktop-control', showControlIndicator)
   powerMonitor.on('lock-screen', () => remoteGateway.setDesktopLocked(true))
   powerMonitor.on('unlock-screen', () => remoteGateway.setDesktopLocked(false))
+  // Report the resolved tunnel up front: it is decided by hostname/credentials
+  // availability, so knowing it before the first connect explains why an address
+  // is or is not permanent.
+  const planned = remoteGateway.namedTunnel
+  writeLog(planned
+    ? `Tunnel: permanent named tunnel ${planned.hostname} (id ${planned.tunnelId})`
+    : 'Tunnel: no named tunnel configured, will fall back to a temporary address')
   registerIpc()
   // The tray is created before the window so the app is reachable even if the
   // window fails to open, and it survives the window being closed.
