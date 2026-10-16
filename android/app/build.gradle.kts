@@ -11,8 +11,8 @@ android {
         applicationId = "local.deepseek.harness.remote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.2.5"
+        versionCode = 9
+        versionName = "0.2.6"
 
         // Extra permanent hostnames the app may pair with, comma separated.
         // Quick tunnels keep working; this is for operators running a named

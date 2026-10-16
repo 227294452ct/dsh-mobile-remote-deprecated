@@ -15,6 +15,9 @@ android/local.properties
 android/**/build/
 android/captures/
 
+# Local APK drop for hand-off; never commit binaries
+dist-apk/
+
 # Signing material and credentials
 *.jks
 *.keystore
