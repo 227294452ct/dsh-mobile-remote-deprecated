@@ -1,15 +1,17 @@
 'use strict'
 
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, powerMonitor, screen, session } = require('electron')
-const { appendFileSync, mkdirSync } = require('node:fs')
+const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, dialog, ipcMain, powerMonitor, screen, session } = require('electron')
+const { appendFileSync, existsSync, mkdirSync } = require('node:fs')
 const path = require('node:path')
 const { RemoteGateway } = require('./remote-gateway.cjs')
 const { createElectronDesktopProvider } = require('./remote-desktop.cjs')
+const { trayMenuTemplate, trayTooltip } = require('./tray-menu.cjs')
 
 const DEFAULT_UPSTREAM_URL = 'http://127.0.0.1:32145'
 
 let remoteWindow = null
 let remoteGateway = null
+let tray = null
 let controlIndicators = []
 let upstreamUrl = null
 let logPath = null
@@ -71,6 +73,9 @@ function broadcastStatus() {
   if (remoteWindow && !remoteWindow.isDestroyed()) {
     remoteWindow.webContents.send('remote:status', currentStatus())
   }
+  // The tray shows the live address and pairing count, so it has to follow the
+  // same status stream as the window.
+  updateTrayMenu()
 }
 
 function showControlIndicator(state) {
@@ -123,15 +128,72 @@ function showControlIndicator(state) {
   })
 }
 
+/**
+ * Bring the pairing panel to the front, creating it if the user closed it.
+ *
+ * Closing the window must not tear down the tunnel — the phone keeps working
+ * while the panel is hidden, which is the whole point of running in the tray.
+ */
+function showRemoteWindow() {
+  if (remoteWindow === null || remoteWindow.isDestroyed()) {
+    void createRemoteWindow()
+    return
+  }
+  if (remoteWindow.isMinimized()) remoteWindow.restore()
+  remoteWindow.show()
+  remoteWindow.focus()
+}
+
+/**
+ * Rebuild the tray menu from live gateway status.
+ *
+ * Called on every status change so the labels and the control entry always
+ * reflect reality instead of a snapshot taken at startup.
+ */
+function updateTrayMenu() {
+  if (tray === null || tray.isDestroyed()) return
+  const status = currentStatus()
+  const template = trayMenuTemplate(status, {
+    onShow: showRemoteWindow,
+    onToggle: () => {
+      void (status.running === true ? disableRemote() : enableRemote()).catch((error) => {
+        dialog.showErrorBox('手机远程', error instanceof Error ? error.message : String(error))
+      })
+    },
+    onCopy: (url) => clipboard.writeText(url),
+    onQuit: () => { shutdownStarted = true; app.quit() },
+    onStopDesktopControl: () => remoteGateway?.stopDesktopControl('local-stop', false)
+  })
+  tray.setContextMenu(Menu.buildFromTemplate(template))
+  tray.setToolTip(trayTooltip(status))
+}
+
+function trayIconPath() {
+  const png = path.join(__dirname, 'build', 'icon.png')
+  const ico = path.join(__dirname, 'build', 'icon.ico')
+  if (process.platform === 'win32' && existsSync(ico)) return ico
+  return existsSync(png) ? png : ico
+}
+
+function createTray() {
+  if (tray !== null && !tray.isDestroyed()) return
+  tray = new Tray(trayIconPath())
+  tray.on('double-click', showRemoteWindow)
+  tray.on('click', showRemoteWindow)
+  updateTrayMenu()
+}
+
 async function enableRemote() {
   const status = await remoteGateway.start(upstreamUrl)
   broadcastStatus()
+  updateTrayMenu()
   return status
 }
 
 async function disableRemote() {
   await remoteGateway.stop(true)
   broadcastStatus()
+  updateTrayMenu()
   return currentStatus()
 }
 
@@ -200,6 +262,9 @@ async function boot() {
   powerMonitor.on('lock-screen', () => remoteGateway.setDesktopLocked(true))
   powerMonitor.on('unlock-screen', () => remoteGateway.setDesktopLocked(false))
   registerIpc()
+  // The tray is created before the window so the app is reachable even if the
+  // window fails to open, and it survives the window being closed.
+  createTray()
   await createRemoteWindow()
   try {
     await enableRemote()
@@ -217,19 +282,29 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (remoteWindow?.isMinimized()) remoteWindow.restore()
-    remoteWindow?.show()
-    remoteWindow?.focus()
+    showRemoteWindow()
   })
   app.whenReady().then(boot).catch((error) => {
     dialog.showErrorBox('DeepSeek Harness Remote 启动失败', error instanceof Error ? error.message : String(error))
     app.quit()
   })
-  app.on('window-all-closed', () => app.quit())
+  // Closing the pairing panel must not stop the tunnel: the phone stays
+  // connected through the tray, which is the only way to keep a long-lived
+  // session across a desktop window being closed.
+  app.on('window-all-closed', () => {
+    // Intentionally left resident in the tray.
+  })
   app.on('before-quit', (event) => {
     if (shutdownStarted) return
     event.preventDefault()
     shutdownStarted = true
-    Promise.resolve(remoteGateway?.stop(true)).finally(() => app.exit(0))
+    Promise.resolve(remoteGateway?.stop(true)).finally(() => {
+      tray?.destroy()
+      app.exit(0)
+    })
   })
 }
+
+// Exported for the headless tray test; the application lifecycle above only
+// runs when this file is the Electron entry point.
+module.exports = { updateTrayMenu }

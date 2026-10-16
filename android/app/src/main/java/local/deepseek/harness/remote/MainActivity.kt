@@ -484,11 +484,27 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Hostnames the app will pair with.
+     *
+     * Quick tunnels always land on `*.trycloudflare.com`, but that hostname changes
+     * on every desktop restart, which forces a re-pair. A named tunnel keeps one
+     * hostname for as long as the tunnel exists, so operators pin theirs here to
+     * get a stable address. Anything beyond these suffixes is refused, because the
+     * pairing link carries both a pairing id and a secret and must not be handed
+     * to an arbitrary host.
+     */
+    private val pinnedRemoteHosts: List<String> = BuildConfig.REMOTE_PINNED_HOSTS
+        .split(',')
+        .map { it.trim().lowercase() }
+        .filter { it.isNotEmpty() }
+
     private fun validRemoteHost(value: String): Boolean {
         return runCatching {
             val uri = Uri.parse(value)
             val host = uri.host?.lowercase() ?: return@runCatching false
-            uri.scheme == "https" && (uri.port == -1 || uri.port == 443) && host.endsWith(".trycloudflare.com") && uri.path.isNullOrEmpty()
+            val allowed = host.endsWith(".trycloudflare.com") || pinnedRemoteHosts.any { host == it }
+            uri.scheme == "https" && (uri.port == -1 || uri.port == 443) && allowed && uri.path.isNullOrEmpty()
         }.getOrDefault(false)
     }
 

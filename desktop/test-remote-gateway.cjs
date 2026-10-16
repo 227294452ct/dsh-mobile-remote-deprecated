@@ -2,13 +2,13 @@
 
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
-const { mkdtempSync } = require('node:fs')
+const { mkdtempSync, writeFileSync } = require('node:fs')
 const http = require('node:http')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const vm = require('node:vm')
-const { RemoteGateway, API_PREFIX, listDriveRoots, extractQuickTunnelUrl, tunnelRetryDelayMs } = require('./remote-gateway.cjs')
+const { RemoteGateway, API_PREFIX, listDriveRoots, extractQuickTunnelUrl, tunnelRetryDelayMs, resolveNamedTunnel, renderNamedTunnelConfig, namedTunnelUrl, NAMED_TUNNEL_PROVIDER } = require('./remote-gateway.cjs')
 const { EventEmitter } = require('node:events')
 const { WebSocket } = require('ws')
 
@@ -17,6 +17,75 @@ assert.equal(extractQuickTunnelUrl('request https://api.trycloudflare.com/tunnel
 assert.equal(tunnelRetryDelayMs(1), 1_500)
 assert.equal(tunnelRetryDelayMs(2), 3_000)
 assert.equal(tunnelRetryDelayMs(99), 30_000)
+
+// --- permanent named tunnel -------------------------------------------------
+// A named tunnel is what keeps one address across restarts; a quick tunnel hands
+// out a new hostname every start, which is what forces the phone to re-pair.
+
+const TUNNEL_UUID = '08d19f8f-19ec-401b-aecd-225ca7ae2ac0'
+
+{
+  // No cloudflared state at all: report "not configured" so the caller can fall
+  // back to a quick tunnel rather than failing the whole start.
+  const emptyHome = mkdtempSync(path.join(os.tmpdir(), 'dsh-tunnel-empty-'))
+  assert.equal(resolveNamedTunnel({ cloudflaredHome: emptyHome, hostname: 'dsh.example.com' }), null)
+}
+
+{
+  // Credentials present but no hostname: there is no stable address to publish.
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-tunnel-nohost-'))
+  writeFileSync(path.join(home, `${TUNNEL_UUID}.json`), '{}')
+  assert.equal(resolveNamedTunnel({ cloudflaredHome: home }), null)
+}
+
+{
+  // The realistic case: one credentials file plus a known hostname.
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-tunnel-ok-'))
+  const credentialsFile = path.join(home, `${TUNNEL_UUID}.json`)
+  writeFileSync(credentialsFile, '{}')
+  const resolved = resolveNamedTunnel({ cloudflaredHome: home, hostname: 'DSH.Example.COM' })
+  assert.ok(resolved !== null, 'a configured named tunnel must resolve')
+  assert.equal(resolved.tunnelId, TUNNEL_UUID)
+  assert.equal(resolved.credentialsFile, credentialsFile)
+  assert.equal(resolved.hostname, 'dsh.example.com', 'hostnames compare case-insensitively')
+  assert.equal(resolved.provider, NAMED_TUNNEL_PROVIDER)
+  assert.equal(namedTunnelUrl(resolved.hostname), 'https://dsh.example.com')
+}
+
+{
+  // A non-UUID file name must not be mistaken for a tunnel identity.
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-tunnel-bad-'))
+  writeFileSync(path.join(home, 'cert.pem'), 'not a tunnel')
+  assert.equal(resolveNamedTunnel({ cloudflaredHome: home, hostname: 'dsh.example.com' }), null)
+}
+
+{
+  // The rendered config must pin the hostname at the live gateway port, and must
+  // keep a catch-all so unknown hostnames do not reach the phone gateway.
+  const config = renderNamedTunnelConfig({
+    tunnelId: TUNNEL_UUID,
+    credentialsFile: 'C:\\creds.json',
+    hostname: 'dsh.example.com',
+    origin: 'http://127.0.0.1:54321'
+  })
+  assert.match(config, new RegExp(`tunnel: ${TUNNEL_UUID}`))
+  assert.match(config, /credentials-file: C:\\creds\.json/)
+  assert.match(config, /- hostname: dsh\.example\.com/)
+  assert.match(config, /service: http:\/\/127\.0\.0\.1:54321/)
+  assert.match(config, /- service: http_status:404/)
+}
+
+{
+  // Status must advertise the address as permanent only for a named tunnel, so
+  // the UI never promises stability a quick tunnel cannot keep.
+  const status = new RemoteGateway({
+    userDataPath: mkdtempSync(path.join(os.tmpdir(), 'dsh-status-')),
+    skipTunnel: true,
+    log: () => {}
+  }).getStatus()
+  assert.equal(status.tunnel.permanent, false)
+  assert.equal(status.tunnel.hostname, null)
+}
 
 class FakeDesktopProvider extends EventEmitter {
   constructor() {

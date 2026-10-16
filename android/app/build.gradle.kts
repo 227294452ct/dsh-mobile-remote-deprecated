@@ -13,6 +13,16 @@ android {
         targetSdk = 34
         versionCode = 8
         versionName = "0.2.5"
+
+        // Extra permanent hostnames the app may pair with, comma separated.
+        // Quick tunnels keep working; this is for operators running a named
+        // tunnel so the phone keeps one address and never has to re-pair.
+        //   ./gradlew assembleDebug -PremotePinnedHosts=dsh.example.com
+        val pinnedHosts = (project.findProperty("remotePinnedHosts") as String?)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: "dsh.xinqiaopsy.top"
+        buildConfigField("String", "REMOTE_PINNED_HOSTS", "\"$pinnedHosts\"")
     }
 
     buildFeatures { buildConfig = true }
