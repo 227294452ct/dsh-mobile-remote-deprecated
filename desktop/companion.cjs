@@ -6,8 +6,7 @@ const path = require('node:path')
 const { RemoteGateway } = require('./remote-gateway.cjs')
 const { createElectronDesktopProvider } = require('./remote-desktop.cjs')
 const { trayMenuTemplate, trayTooltip } = require('./tray-menu.cjs')
-
-const DEFAULT_UPSTREAM_URL = 'http://127.0.0.1:32145'
+const { resolveHostname, resolveUpstream } = require('./startup-options.cjs')
 
 let remoteWindow = null
 let remoteGateway = null
@@ -16,28 +15,6 @@ let controlIndicators = []
 let upstreamUrl = null
 let logPath = null
 let shutdownStarted = false
-
-function readArgument(name) {
-  const prefix = `${name}=`
-  const exactIndex = process.argv.indexOf(name)
-  if (exactIndex >= 0 && process.argv[exactIndex + 1]) return process.argv[exactIndex + 1]
-  const inline = process.argv.find((value) => value.startsWith(prefix))
-  return inline ? inline.slice(prefix.length) : null
-}
-
-function normalizeUpstream(rawValue) {
-  const value = String(rawValue || '').trim()
-  const parsed = new URL(value)
-  if (parsed.protocol !== 'http:') throw new Error('上游地址必须使用 http://。')
-  if (!['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)) {
-    throw new Error('出于安全考虑，上游地址必须指向本机回环地址。')
-  }
-  if (!parsed.port) throw new Error('上游地址必须包含端口号。')
-  parsed.pathname = '/'
-  parsed.search = ''
-  parsed.hash = ''
-  return parsed.origin
-}
 
 function writeLog(message) {
   if (!logPath) return
@@ -238,14 +215,11 @@ async function boot() {
   mkdirSync(logDirectory, { recursive: true })
   logPath = path.join(logDirectory, 'remote.log')
 
-  upstreamUrl = normalizeUpstream(
-    readArgument('--upstream') || process.env.DSH_UPSTREAM_URL || DEFAULT_UPSTREAM_URL
-  )
-  // A permanent hostname is what stops the phone from re-pairing after a
-  // restart. Without one the gateway falls back to a quick tunnel whose address
-  // changes every launch, so it is passed in explicitly rather than left to
-  // chance.
-  const hostname = readArgument('--hostname') || process.env.DSH_TUNNEL_HOSTNAME || null
+  // Both options decide whether a phone keeps its pairing after a restart, so
+  // they are resolved by the tested startup-options module rather than inline.
+  upstreamUrl = resolveUpstream()
+  const hostname = resolveHostname()
+  writeLog(`Starting: upstream=${upstreamUrl} hostname=${hostname ?? '(none, will use a temporary address)'}`)
   configureSessionSecurity()
   remoteGateway = new RemoteGateway({
     userDataPath: app.getPath('userData'),
