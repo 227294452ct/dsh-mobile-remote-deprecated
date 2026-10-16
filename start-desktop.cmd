@@ -7,9 +7,9 @@ rem automated session cannot keep it alive, because the process is a child of th
 rem controlling shell and dies with it. Run this from your own desktop session
 rem (double-click, or from a normal PowerShell window) so it stays up.
 rem
-rem It dials the local Harness on 19387 and advertises the permanent hostname, so
-rem the pairing QR carries https://dsh.xinqiaopsy.top instead of a throwaway
-rem trycloudflare address.
+rem The harness port is auto-discovered (19387 first, then any port a Harness
+rem process actually holds). The permanent hostname is pinned so the pairing QR
+rem carries https://dsh.xinqiaopsy.top instead of a throwaway address.
 
 setlocal
 set "APPDIR=F:\dsh-remote-build\desktop"
@@ -27,12 +27,12 @@ if not exist "%ELECTRON%" (
 )
 
 echo Starting DeepSeek Harness Remote...
-echo   upstream : http://127.0.0.1:19387
-echo   hostname : dsh.xinqiaopsy.top
+echo   upstream : auto-discovered (falls back to 32145 if none answers)
+echo   hostname : dsh.xinqiaopsy.top  (permanent)
 echo.
 echo A tray icon should appear. Right-click it for the phone-remote menu.
 echo Close this window if you like; the app keeps running in the tray.
 echo.
 
-start "" "%ELECTRON%" "%APPDIR%" --upstream http://127.0.0.1:19387 --hostname dsh.xinqiaopsy.top
+start "" "%ELECTRON%" "%APPDIR%" --hostname dsh.xinqiaopsy.top
 endlocal

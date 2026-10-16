@@ -15,7 +15,8 @@ const {
   normalizeUpstream,
   readArgument,
   resolveHostname,
-  resolveUpstream
+  resolveUpstream,
+  resolveUpstreamWithDiscovery
 } = require('./startup-options.cjs')
 
 // --- readArgument ----------------------------------------------------------
@@ -96,4 +97,76 @@ const {
   assert.equal(resolveHostname(['electron.exe', '.', '--hostname', '   '], {}), null)
 }
 
-console.log('startup-options-test-ok')
+// --- auto-discovery --------------------------------------------------------
+// The companion must find the harness without being told the port, because the
+// port is an implementation detail the user should not have to look up.
+//
+// This file is CommonJS, so the async cases run inside main() rather than at the
+// top level.
+
+const { probeHarness } = require('./startup-options.cjs')
+
+/** Point the module at a throwaway HTTP server that answers like the harness. */
+async function withFakeHarness(status, run) {
+  const http = require('node:http')
+  const server = http.createServer((_request, response) => {
+    response.writeHead(status)
+    response.end('')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  try {
+    return await run(port)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+}
+
+async function main() {
+  // 401 is the harness's unauthenticated answer, 200 its authenticated one.
+  await withFakeHarness(401, async (port) => {
+    assert.equal(await probeHarness(`http://127.0.0.1:${port}`), true, '401 must count as the harness')
+  })
+  await withFakeHarness(200, async (port) => {
+    assert.equal(await probeHarness(`http://127.0.0.1:${port}`), true, '200 must count as the harness')
+  })
+
+  // Anything else is not the harness, however alive it looks.
+  await withFakeHarness(404, async (port) => {
+    assert.equal(await probeHarness(`http://127.0.0.1:${port}`), false, '404 is not the harness')
+  })
+  await withFakeHarness(302, async (port) => {
+    assert.equal(await probeHarness(`http://127.0.0.1:${port}`), false, 'a redirect is not the harness')
+  })
+
+  // A closed port must fail fast rather than hang the launch.
+  assert.equal(await probeHarness('http://127.0.0.1:9', 800), false)
+
+  // An explicit choice is never re-resolved, so a stray local port cannot
+  // silently override what the operator asked for.
+  const explicit = await resolveUpstreamWithDiscovery(
+    ['electron.exe', '.', '--upstream', 'http://127.0.0.1:55555'],
+    {}
+  )
+  assert.equal(explicit.origin, 'http://127.0.0.1:55555')
+  assert.equal(explicit.source, 'explicit')
+  assert.equal(explicit.discovered, false)
+
+  const viaEnv = await resolveUpstreamWithDiscovery(['electron.exe', '.'], { DSH_UPSTREAM_URL: 'http://127.0.0.1:44444' })
+  assert.equal(viaEnv.origin, 'http://127.0.0.1:44444')
+  assert.equal(viaEnv.source, 'explicit')
+
+  // Discovery disabled must fall back to the documented default rather than
+  // probing anything, so the escape hatch is trustworthy.
+  const off = await resolveUpstreamWithDiscovery(['electron.exe', '.'], { DSH_TUNNEL_DISABLE_DISCOVERY: '1' })
+  assert.equal(off.origin, DEFAULT_UPSTREAM_URL)
+  assert.equal(off.discovered, false)
+  assert.equal(off.source, 'default')
+
+  console.log('startup-options-test-ok')
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

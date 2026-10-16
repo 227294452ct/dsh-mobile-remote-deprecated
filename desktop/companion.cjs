@@ -6,7 +6,7 @@ const path = require('node:path')
 const { RemoteGateway } = require('./remote-gateway.cjs')
 const { createElectronDesktopProvider } = require('./remote-desktop.cjs')
 const { trayMenuTemplate, trayTooltip } = require('./tray-menu.cjs')
-const { resolveHostname, resolveUpstream } = require('./startup-options.cjs')
+const { resolveHostname, resolveUpstreamWithDiscovery } = require('./startup-options.cjs')
 
 let remoteWindow = null
 let remoteGateway = null
@@ -217,9 +217,12 @@ async function boot() {
 
   // Both options decide whether a phone keeps its pairing after a restart, so
   // they are resolved by the tested startup-options module rather than inline.
-  upstreamUrl = resolveUpstream()
+  // The upstream is auto-discovered when not given, so the app works without
+  // being told which port the harness happens to be on.
+  const upstream = await resolveUpstreamWithDiscovery()
+  upstreamUrl = upstream.origin
   const hostname = resolveHostname()
-  writeLog(`Starting: upstream=${upstreamUrl} hostname=${hostname ?? '(none, will use a temporary address)'}`)
+  writeLog(`Starting: upstream=${upstreamUrl} (${upstream.source}) hostname=${hostname ?? '(none, will use a temporary address)'}`)
   configureSessionSecurity()
   remoteGateway = new RemoteGateway({
     userDataPath: app.getPath('userData'),
