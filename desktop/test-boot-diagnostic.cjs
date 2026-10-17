@@ -48,14 +48,19 @@ async function renderThroughGateway(html) {
   }
   await gateway.proxyHtmlWithCompatibility(request, response)
   await new Promise((resolve) => harness.close(resolve))
-  return { html: captured.body.toString('utf8'), status: captured.status }
+  return { html: captured.body.toString('utf8'), status: captured.status, headers: captured.headers }
 }
 
 async function main() {
   const source = '<html><head><title>t</title></head><body><div id="root"></div></body></html>'
-  const { html, status } = await renderThroughGateway(source)
+  const { html, status, headers } = await renderThroughGateway(source)
 
   assert.equal(status, 200)
+  // A WebView will keep serving a cached document even when told not to, and a
+  // document cached against a previous harness points at bundles that no longer
+  // exist. The cache must be dropped so the next load re-reads the current one.
+  assert.equal(headers['clear-site-data'], '"cache"', 'the document must clear the origin cache')
+  assert.match(String(headers['cache-control']), /no-store/, 'the document must not be cached')
   assert.ok(html.includes('id="__dsh_boot_diag"') || html.includes('__dsh_boot_diag'), 'diagnostic overlay must be injected')
   assert.ok(html.includes('unhandledrejection'), 'unhandled rejections must be reported')
   assert.ok(html.includes('addEventListener'), 'an error listener must be installed')

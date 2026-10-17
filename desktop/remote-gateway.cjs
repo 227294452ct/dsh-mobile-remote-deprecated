@@ -2643,6 +2643,12 @@ class RemoteGateway extends EventEmitter {
       outputHeaders.expires = '0'
       delete outputHeaders.etag
       delete outputHeaders['last-modified']
+      // A WebView happily keeps serving a cached document even when it is told
+      // not to, and a document cached against a different harness points at
+      // plugin bundles that no longer exist — which looks exactly like a broken
+      // app. Ask it to drop the origin's cache, then re-download. Cheap now that
+      // the bundle is ~18 KB instead of megabytes.
+      outputHeaders['clear-site-data'] = '"cache"'
     }
     response.writeHead(upstream.status, outputHeaders)
     response.end(output)
