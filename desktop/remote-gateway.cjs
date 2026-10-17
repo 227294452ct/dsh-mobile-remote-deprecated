@@ -22,6 +22,16 @@ const TUNNEL_START_TIMEOUT_MS = 45_000
 // enough that a phone user does not sit on a dead address.
 const TUNNEL_STALE_MS = 90_000
 const TUNNEL_RESTART_DELAY_MS = 2_000
+// Cloudflare hands a tunnel a different edge each time it connects, and the choice
+// decides whether the product is usable: Tokyo measured 0.6s round trips while Los
+// Angeles measured 1.4-5s with half the probes failing. Nothing on our side selects
+// the edge, so the only lever is to reconnect and hope for a better one — which is
+// what the probe below decides.
+const EDGE_PROBE_INTERVAL_MS = 30_000
+const EDGE_PROBE_TIMEOUT_MS = 8_000
+const EDGE_SLOW_MS = 2_500
+const EDGE_BAD_STRIKES = 3
+const EDGE_RESTART_COOLDOWN_MS = 5 * 60_000
 const TUNNEL_RETRY_BASE_DELAY_MS = 1_500
 const TUNNEL_RETRY_MAX_DELAY_MS = 30_000
 const PUBLIC_TUNNEL_IDENTITY = '内置安全隧道'
@@ -1501,6 +1511,12 @@ class RemoteGateway extends EventEmitter {
     this.tunnelConnections = new Set()
     this.tunnelLastAliveAt = 0
     this.tunnelRestarting = false
+    // Edge quality supervision: the tunnel can be up while the edge Cloudflare
+    // picked makes it unusable.
+    this.edgeMonitor = null
+    this.edgeStrikes = 0
+    this.edgeLastRestartAt = 0
+    this.edgeProbeInFlight = false
     this.server = null
     this.proxy = null
     this.gatewayPort = null
@@ -1721,6 +1737,8 @@ class RemoteGateway extends EventEmitter {
       return this.getStatus()
     }
     this.log(`Remote gateway ready at ${this.remoteUrl} -> http://127.0.0.1:${this.gatewayPort}`)
+    // Only meaningful once an address exists to probe.
+    if (!this.skipTunnel) this.startEdgeHealthMonitor()
     this.emit('status', this.getStatus())
     return this.getStatus()
   }
@@ -1917,6 +1935,84 @@ class RemoteGateway extends EventEmitter {
     }
   }
 
+  /**
+   * Watch the public address and reconnect when the edge is bad.
+   *
+   * The tunnel can be registered and healthy while the edge Cloudflare picked is
+   * on the far side of the planet, which shows up as seconds of latency and
+   * dropped requests rather than as an error. Since we cannot choose the edge,
+   * the only remedy is to reconnect and let Cloudflare pick again — so measure the
+   * user's actual path and reconnect when it stays bad, not merely slow once.
+   *
+   * Probes go to the public URL on purpose: that is the path the phone uses, and
+   * a local health check would always look perfect.
+   */
+  startEdgeHealthMonitor() {
+    this.stopEdgeHealthMonitor()
+    this.edgeStrikes = 0
+    this.edgeLastRestartAt = 0
+
+    this.edgeMonitor = setInterval(() => {
+      if (this.remoteUrl === null || this.tunnelProcess === null) return
+      void this.probeEdgeHealth()
+    }, EDGE_PROBE_INTERVAL_MS)
+    this.edgeMonitor.unref?.()
+  }
+
+  stopEdgeHealthMonitor() {
+    if (this.edgeMonitor !== null) {
+      clearInterval(this.edgeMonitor)
+      this.edgeMonitor = null
+    }
+  }
+
+  /** One probe; counts strikes and reconnects the tunnel when they add up. */
+  async probeEdgeHealth() {
+    if (this.edgeProbeInFlight) return
+    this.edgeProbeInFlight = true
+    const startedAt = Date.now()
+    let ok = false
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), EDGE_PROBE_TIMEOUT_MS)
+      try {
+        // `/health` is unauthenticated, so this measures the transport instead of
+        // accidentally measuring a device's session state.
+        const response = await fetch(`${this.remoteUrl}${API_PREFIX}/health`, {
+          signal: controller.signal,
+          redirect: 'manual'
+        })
+        ok = response.status === 200
+      } finally {
+        clearTimeout(timer)
+      }
+    } catch {
+      ok = false
+    } finally {
+      this.edgeProbeInFlight = false
+    }
+
+    const elapsed = Date.now() - startedAt
+    const healthy = ok && elapsed <= EDGE_SLOW_MS
+    if (healthy) {
+      if (this.edgeStrikes > 0) this.log(`边缘探测恢复正常（${elapsed}ms）。`)
+      this.edgeStrikes = 0
+      return
+    }
+
+    this.edgeStrikes += 1
+    this.log(`边缘探测不佳（${ok ? `${elapsed}ms` : '失败'}），连续 ${this.edgeStrikes} 次。`)
+    if (this.edgeStrikes < EDGE_BAD_STRIKES) return
+
+    const sinceLast = Date.now() - this.edgeLastRestartAt
+    if (sinceLast < EDGE_RESTART_COOLDOWN_MS) return
+
+    this.edgeStrikes = 0
+    this.edgeLastRestartAt = Date.now()
+    this.log('边缘持续不佳，重连以重新选择 Cloudflare 节点。')
+    this.restartTunnel()
+  }
+
   /** Kill the current tunnel and start it again, with the state machine intact. */
   restartTunnel() {
     if (this.tunnelRestarting) return
@@ -2029,6 +2125,7 @@ class RemoteGateway extends EventEmitter {
 
   async stop(disableServe = true) {
     this.stopTunnelWatchdog()
+    this.stopEdgeHealthMonitor()
     this.tunnelConnections = new Set()
     if (this.tunnelRetryTimer !== null) clearTimeout(this.tunnelRetryTimer)
     this.tunnelRetryTimer = null
