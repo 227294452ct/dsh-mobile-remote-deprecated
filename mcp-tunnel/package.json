@@ -1,0 +1,29 @@
+{
+  "name": "dsh-tunnel-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that gives DeepSeek Harness a permanent public address for the DeepSeek Harness Desktop phone/mobile gateway, using a Cloudflare named tunnel (stable hostname) instead of a random trycloudflare.com quick tunnel.",
+  "type": "module",
+  "main": "src/server.mjs",
+  "bin": {
+    "dsh-tunnel-mcp": "bin/dsh-tunnel-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/dsh-tunnel-mcp.mjs",
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "install:dsh": "node scripts/install-dsh.mjs",
+    "verify:named": "node scripts/named-tunnel-runtime.mjs",
+    "verify:permanent": "node scripts/verify-permanent-url.mjs",
+    "inspect:cloudflare": "node scripts/inspect-cloudflare-zone.mjs",
+    "verify:e2e": "node scripts/e2e-tunnel.mjs",
+    "verify:e2e:named": "node scripts/e2e-tunnel.mjs --named"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "qrcode": "^1.5.4"
+  }
+}

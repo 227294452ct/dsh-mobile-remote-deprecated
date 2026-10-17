@@ -1,3 +1,15 @@
+> [!WARNING]
+> **本项目已废弃（DEPRECATED），仅作归档备份保留。**
+>
+> 手机远程方案已放弃：依赖 Cloudflare 隧道时边缘节点不可控（中国移动常被调度到
+> 洛杉矶，实测 1.4~5 秒延迟、50% 请求失败），且无法在免费方案内稳定解决。
+>
+> 归档内容：
+> - `desktop/` `android/` — 手机远程客户端与伴侣应用（含永久命名隧道、托盘、
+>   HTTP/2 传输、harness 认证、隧道看门狗与边缘自愈）
+> - `mcp-tunnel/` — 配套的 DSH MCP 隧道插件
+>
+> 最后提交：efcf246
 # DeepSeek Harness Remote
 
 一个独立的 DeepSeek Harness 远程连接组件：电脑端把**已经在本机运行的 Harness Web 服务**通过 HTTPS 安全隧道转发，Android 端扫码配对后即可远程使用。

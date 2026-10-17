@@ -1,0 +1,28 @@
+# dsh-tunnel-mcp — registration (added by hand for the desktop profile)
+#
+# Remove this whole block to uninstall the bridge. It only adds one MCP client
+# entry; it does not modify the Desktop app or your profile bundles.
+#
+# Why this exists: DeepSeek Harness Desktop exposed the phone gateway through a
+# Cloudflare *Quick* Tunnel, whose hostname is regenerated on every start and
+# every edge reconnect. The phone therefore had to be re-pointed constantly.
+# This MCP server runs a Cloudflare *Named* tunnel on a domain you own, so the
+# URL https://<your-hostname> is permanent.
+#
+# Install location: this file is a copy for the DSH profile. The live config is
+# C:\Users\Administrator\.dsh\cordis.patch.yml — keep the two in sync.
+
+- insert:
+    - id: dsh-tunnel-mcp
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: dsh_tunnel
+        transport: stdio
+        command: C:\Program Files\nodejs\node.exe
+        args:
+          - F:\Agent yy\DSH\DSH改造\tunnel-mcp\bin\dsh-tunnel-mcp.mjs
+        failOnStartupError: false
+        toolCallTimeoutMs: 120000
+        reconnect:
+          enabled: true
+          maxAttempts: 20
