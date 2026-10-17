@@ -7,6 +7,7 @@ const { RemoteGateway } = require('./remote-gateway.cjs')
 const { createElectronDesktopProvider } = require('./remote-desktop.cjs')
 const { trayMenuTemplate, trayTooltip } = require('./tray-menu.cjs')
 const { readArgument, resolveHostname, resolveUpstreamWithDiscovery } = require('./startup-options.cjs')
+const { startBundledHarness } = require('./harness-launcher.cjs')
 const { findHarnessToken } = require('./harness-token.cjs')
 
 let remoteWindow = null
@@ -14,6 +15,9 @@ let remoteGateway = null
 let tray = null
 let controlIndicators = []
 let upstreamUrl = null
+// The harness this app launched itself, if any. It is stopped on quit so a
+// restart does not leave an orphaned runtime holding a port.
+let bundledHarness = null
 let logPath = null
 let shutdownStarted = false
 
@@ -178,6 +182,10 @@ function createTray() {
  * starts, and the pairing window explains what the phone will see.
  */
 async function resolveHarnessToken() {
+  // When this app launched the harness itself, it captured the token from the
+  // printed URL: reading process memory would be a needless risk.
+  if (bundledHarness !== null) return bundledHarness.token
+
   const explicit = readArgument('--harness-token') || process.env.DSH_HARNESS_TOKEN || null
   if (explicit) {
     writeLog('Harness token: supplied explicitly')
@@ -275,14 +283,35 @@ async function boot() {
   mkdirSync(logDirectory, { recursive: true })
   logPath = path.join(logDirectory, 'remote.log')
 
-  // Both options decide whether a phone keeps its pairing after a restart, so
-  // they are resolved by the tested startup-options module rather than inline.
-  // The upstream is auto-discovered when not given, so the app works without
-  // being told which port the harness happens to be on.
-  const upstream = await resolveUpstreamWithDiscovery()
-  upstreamUrl = upstream.origin
+  // Prefer the harness that ships with this app.
+  //
+  // Attaching to whatever install the user happens to be running makes the phone
+  // download that profile's full client bundle — 10 MB with every plugin enabled,
+  // which never finishes over a tunnel link and leaves a blank page. The bundled
+  // runtime serves a single ~20 KB bundle and prints its own token, so no memory
+  // scan is needed either.
+  //
+  // An explicit --upstream or DSH_UPSTREAM_URL still wins: that is the deliberate
+  // "attach to my running harness" choice, and it must not be silently overridden.
+  const explicitUpstream = readArgument('--upstream') || process.env.DSH_UPSTREAM_URL || null
+  if (explicitUpstream === null) {
+    try {
+      bundledHarness = await startBundledHarness({ userDataPath: app.getPath('userData'), log: writeLog })
+      upstreamUrl = bundledHarness.origin
+      writeLog(`Upstream: bundled harness on ${bundledHarness.origin}`)
+    } catch (error) {
+      writeLog(`Bundled harness unavailable, falling back to an existing one: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // Falls back to discovery when no bundled runtime is present or one failed.
+  if (upstreamUrl === null) {
+    const upstream = await resolveUpstreamWithDiscovery()
+    upstreamUrl = upstream.origin
+    writeLog(`Upstream: existing harness on ${upstreamUrl} (${upstream.source})`)
+  }
   const hostname = resolveHostname()
-  writeLog(`Starting: upstream=${upstreamUrl} (${upstream.source}) hostname=${hostname ?? '(none, will use a temporary address)'}`)
+  writeLog(`Starting: hostname=${hostname ?? '(none, will use a temporary address)'}`)
   configureSessionSecurity()
   remoteGateway = new RemoteGateway({
     userDataPath: app.getPath('userData'),
@@ -353,6 +382,13 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     shutdownStarted = true
     Promise.resolve(remoteGateway?.stop(true)).finally(() => {
+      // Stop the harness this app started; leaving it running would hold a port
+      // and confuse the next launch's discovery.
+      try {
+        bundledHarness?.stop()
+      } catch {
+        // Already gone.
+      }
       tray?.destroy()
       app.exit(0)
     })
