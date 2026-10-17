@@ -1797,6 +1797,10 @@ class RemoteGateway extends EventEmitter {
         { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] }
       )
       this.tunnelProcess = child
+      // Arm supervision at spawn, not at first registration: a tunnel that never
+      // registers is the worst case, and arming later leaves it dead forever with
+      // the process still alive and nothing in the logs to show for it.
+      this.startTunnelWatchdog()
       const finish = (error, url) => {
         if (settled) return
         settled = true
@@ -1864,9 +1868,13 @@ class RemoteGateway extends EventEmitter {
    * reconnect.
    */
   startTunnelWatchdog() {
-    this.stopTunnelWatchdog()
-    this.tunnelConnections = new Set()
-    this.tunnelLastAliveAt = Date.now()
+    // Idempotent: cloudflared reports a registration on many chunks of output, and
+    // re-arming per chunk would reset the connection set to empty each time. The
+    // watchdog would then see "no connections" 90s later and restart a perfectly
+    // healthy tunnel, forever. That is a reconnect loop, not supervision.
+    if (this.tunnelWatchdog !== null) return
+    if (!(this.tunnelConnections instanceof Set)) this.tunnelConnections = new Set()
+    if (this.tunnelConnections.size === 0) this.tunnelLastAliveAt = Date.now()
 
     this.tunnelWatchdog = setInterval(() => {
       if (this.server === null || this.tunnelProcess === null) return
@@ -1912,6 +1920,9 @@ class RemoteGateway extends EventEmitter {
     const child = this.tunnelProcess
     this.tunnelProcess = null
     this.stopTunnelWatchdog()
+    // Deliberate restart, so start the new connection set from scratch.
+    this.tunnelConnections = new Set()
+    this.tunnelLastAliveAt = Date.now()
     if (child !== null) {
       try {
         child.kill()
@@ -1955,6 +1966,9 @@ class RemoteGateway extends EventEmitter {
         'tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', origin
       ], { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
       this.tunnelProcess = child
+      // Same reason as the named tunnel: supervise from spawn, or a tunnel that
+      // never registers is never noticed.
+      this.startTunnelWatchdog()
       const finish = (error, url) => {
         if (settled) return
         settled = true
