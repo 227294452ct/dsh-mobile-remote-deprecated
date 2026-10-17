@@ -1523,6 +1523,10 @@ class RemoteGateway extends EventEmitter {
       : null
     this.harnessToken = null
     this.harnessAuthRetry = null
+    // Cleared once, on the first document served by this process, so a document
+    // cached against a previous harness cannot keep pointing at bundles that no
+    // longer exist — without also re-downloading them on every load.
+    this.clearSiteCachePending = true
     // Transport for the named tunnel. Defaults to HTTP/2 because QUIC (UDP) is
     // frequently broken behind VPNs and proxies, and the failure mode is a tunnel
     // that retries forever with the public address answering 530.
@@ -2660,9 +2664,13 @@ class RemoteGateway extends EventEmitter {
       // A WebView happily keeps serving a cached document even when it is told
       // not to, and a document cached against a different harness points at
       // plugin bundles that no longer exist — which looks exactly like a broken
-      // app. Ask it to drop the origin's cache, then re-download. Cheap now that
-      // the bundle is ~18 KB instead of megabytes.
-      outputHeaders['clear-site-data'] = '"cache"'
+      // app. Ask it to drop the origin's cache once per start, not on every load:
+      // the plugin bundle here is several megabytes and must stay cached after
+      // the first successful download.
+      if (this.clearSiteCachePending) {
+        outputHeaders['clear-site-data'] = '"cache"'
+        this.clearSiteCachePending = false
+      }
     }
     response.writeHead(upstream.status, outputHeaders)
     response.end(output)

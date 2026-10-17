@@ -283,28 +283,30 @@ async function boot() {
   mkdirSync(logDirectory, { recursive: true })
   logPath = path.join(logDirectory, 'remote.log')
 
-  // Prefer the harness that ships with this app.
+  // Attach to the harness the user is actually working in, by default.
   //
-  // Attaching to whatever install the user happens to be running makes the phone
-  // download that profile's full client bundle — 10 MB with every plugin enabled,
-  // which never finishes over a tunnel link and leaves a blank page. The bundled
-  // runtime serves a single ~20 KB bundle and prints its own token, so no memory
-  // scan is needed either.
+  // The phone must show the same workspace as the PC: the same conversations, the
+  // same files. A harness this app launches itself has its own DSH_HOME, so it is
+  // a genuinely different workspace — files created there never appear on the PC,
+  // which is confusing rather than useful.
   //
-  // An explicit --upstream or DSH_UPSTREAM_URL still wins: that is the deliberate
-  // "attach to my running harness" choice, and it must not be silently overridden.
+  // The bundled runtime remains available because it serves an 18 KB client
+  // bundle instead of several megabytes, which matters on a poor link. Opt into it
+  // with --bundled-harness or DSH_REMOTE_BUNDLED_HARNESS=1.
   const explicitUpstream = readArgument('--upstream') || process.env.DSH_UPSTREAM_URL || null
-  if (explicitUpstream === null) {
+  const wantBundled = readArgument('--bundled-harness') !== null || process.env.DSH_REMOTE_BUNDLED_HARNESS === '1'
+  if (explicitUpstream === null && wantBundled) {
     try {
       bundledHarness = await startBundledHarness({ userDataPath: app.getPath('userData'), log: writeLog })
       upstreamUrl = bundledHarness.origin
-      writeLog(`Upstream: bundled harness on ${bundledHarness.origin}`)
+      writeLog(`Upstream: bundled harness on ${bundledHarness.origin} (separate workspace)`)
     } catch (error) {
       writeLog(`Bundled harness unavailable, falling back to an existing one: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  // Falls back to discovery when no bundled runtime is present or one failed.
+  // Discovers the running harness (typically the user's own install) when no
+  // explicit upstream or bundled runtime was requested.
   if (upstreamUrl === null) {
     const upstream = await resolveUpstreamWithDiscovery()
     upstreamUrl = upstream.origin

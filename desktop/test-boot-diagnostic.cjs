@@ -56,10 +56,11 @@ async function main() {
   const { html, status, headers } = await renderThroughGateway(source)
 
   assert.equal(status, 200)
-  // A WebView will keep serving a cached document even when told not to, and a
-  // document cached against a previous harness points at bundles that no longer
-  // exist. The cache must be dropped so the next load re-reads the current one.
-  assert.equal(headers['clear-site-data'], '"cache"', 'the document must clear the origin cache')
+  // The first document of a process must drop the origin cache, so a document
+  // cached against a previous harness cannot keep pointing at bundles that no
+  // longer exist. It must happen once, not per load: the plugin bundle is
+  // megabytes and has to stay cached after the first successful download.
+  assert.equal(headers['clear-site-data'], '"cache"', 'the first document must clear the origin cache')
   assert.match(String(headers['cache-control']), /no-store/, 'the document must not be cached')
   assert.ok(html.includes('id="__dsh_boot_diag"') || html.includes('__dsh_boot_diag'), 'diagnostic overlay must be injected')
   assert.ok(html.includes('unhandledrejection'), 'unhandled rejections must be reported')
@@ -82,6 +83,40 @@ async function main() {
   // A document without <head> must still get the injection rather than crash.
   const bare = await renderThroughGateway('<div>no head</div>')
   assert.ok(bare.html.includes('__dsh_boot_diag'))
+
+  // The cache clear is a one-shot transition tool, not a per-load cost.
+  {
+    const gateway = new RemoteGateway({
+      userDataPath: mkdtempSync(path.join(os.tmpdir(), 'dsh-clear-once-')),
+      skipTunnel: true,
+      log: () => {}
+    })
+    const harness = http.createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<html><head></head><body><div id="root"></div></body></html>')
+    })
+    await new Promise((resolve) => harness.listen(0, '127.0.0.1', resolve))
+    gateway.harnessUrl = `http://127.0.0.1:${harness.address().port}`
+
+    const headersFor = async () => {
+      const captured = {}
+      await gateway.proxyHtmlWithCompatibility(
+        { method: 'GET', url: '/', headers: {} },
+        {
+          headersSent: false,
+          writeHead(_status, headers) { captured.headers = headers; this.headersSent = true },
+          end() {},
+          on() {},
+          once() {}
+        }
+      )
+      return captured.headers
+    }
+
+    assert.equal((await headersFor())['clear-site-data'], '"cache"', 'first document clears the cache')
+    assert.equal((await headersFor())['clear-site-data'], undefined, 'later documents must not clear it again')
+    await new Promise((resolve) => harness.close(resolve))
+  }
 
   // Non-HTML responses must pass through untouched.
   const json = http.createServer((_request, response) => {
