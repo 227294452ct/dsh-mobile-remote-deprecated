@@ -6,7 +6,8 @@ const path = require('node:path')
 const { RemoteGateway } = require('./remote-gateway.cjs')
 const { createElectronDesktopProvider } = require('./remote-desktop.cjs')
 const { trayMenuTemplate, trayTooltip } = require('./tray-menu.cjs')
-const { resolveHostname, resolveUpstreamWithDiscovery } = require('./startup-options.cjs')
+const { readArgument, resolveHostname, resolveUpstreamWithDiscovery } = require('./startup-options.cjs')
+const { findHarnessToken } = require('./harness-token.cjs')
 
 let remoteWindow = null
 let remoteGateway = null
@@ -167,8 +168,46 @@ function createTray() {
   }
 }
 
+/**
+ * Obtain the harness auth token.
+ *
+ * Precedence: an explicit value, then the one recovered from the running harness
+ * process. The harness mints its token at startup and never writes it to disk, so
+ * attaching to an instance the user already has running means reading it from
+ * that process's memory. A failure is logged and tolerated: the gateway still
+ * starts, and the pairing window explains what the phone will see.
+ */
+async function resolveHarnessToken() {
+  const explicit = readArgument('--harness-token') || process.env.DSH_HARNESS_TOKEN || null
+  if (explicit) {
+    writeLog('Harness token: supplied explicitly')
+    return explicit
+  }
+
+  const upstream = (() => {
+    try {
+      return new URL(upstreamUrl ?? '')
+    } catch {
+      return null
+    }
+  })()
+  const port = upstream?.port ? Number(upstream.port) : null
+  writeLog(`Harness token: recovering from the running harness (port ${port ?? 'auto'})...`)
+  const found = await findHarnessToken({ port, log: writeLog })
+  if (!found.ok) {
+    writeLog(`Harness token unavailable: ${found.error}`)
+    return null
+  }
+  writeLog(`Harness token recovered (port ${found.port}, pid ${found.pid}, ${found.candidates} candidate(s))`)
+  return found.token
+}
+
 async function enableRemote() {
-  const status = await remoteGateway.start(upstreamUrl)
+  // DSH 0.1.5+ refuses unauthenticated loopback requests, so the harness token
+  // has to be presented upstream or every paired phone sees the "dsh web
+  // authentication required" page instead of the interface.
+  const token = await resolveHarnessToken()
+  const status = await remoteGateway.start(upstreamUrl, token)
   broadcastStatus()
   updateTrayMenu()
   return status
@@ -249,6 +288,10 @@ async function boot() {
     userDataPath: app.getPath('userData'),
     cloudflaredPath: cloudflaredPath(),
     hostname,
+    // Lets the gateway recover on its own when a harness restart invalidates the
+    // cookie captured at launch, instead of every phone falling back to the
+    // auth-required page until the companion is restarted.
+    harnessTokenProvider: resolveHarnessToken,
     log: writeLog,
     desktopProvider: createElectronDesktopProvider({
       desktopCapturer,

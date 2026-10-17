@@ -1444,6 +1444,18 @@ class RemoteGateway extends EventEmitter {
     this.namedTunnelConfigPath = options.namedTunnelConfigPath
       || path.join(this.userDataPath || __dirname, 'cloudflared-named.yml')
     this.harnessUrl = null
+    // DSH 0.1.5+ rejects unauthenticated loopback requests. The gateway exchanges
+    // the harness startup token for a `dsh-auth-*` cookie once and presents it
+    // upstream on every paired device's behalf; devices never see it.
+    this.harnessCookie = null
+    // Supplies a fresh token when the current cookie stops working. The harness
+    // mints a new token when it restarts, so a cookie captured at launch goes
+    // stale and every phone would silently fall back to the auth-required page.
+    this.harnessTokenProvider = typeof options.harnessTokenProvider === 'function'
+      ? options.harnessTokenProvider
+      : null
+    this.harnessToken = null
+    this.harnessAuthRetry = null
     this.pairings = new Map()
     this.challenges = new Map()
     this.sessions = new Map()
@@ -1519,10 +1531,83 @@ class RemoteGateway extends EventEmitter {
     }
   }
 
-  async start(harnessUrl) {
+  /**
+   * Exchange the harness startup token for its own auth cookie.
+   *
+   * DSH 0.1.5+ answers an unauthenticated loopback request with 401, so the
+   * gateway authenticates once and then presents that cookie upstream for every
+   * paired device. Devices never receive it.
+   *
+   * Returns true when a cookie was acquired. The caller may retry this later:
+   * a harness restart mints a new token and invalidates the old cookie.
+   */
+  async authenticateHarness(token) {
+    this.harnessCookie = null
+    if (typeof token !== 'string' || token.length === 0) return false
+    try {
+      const entry = new URL(`/?token=${encodeURIComponent(token)}`, this.harnessUrl)
+      const upstream = await fetch(entry, {
+        redirect: 'manual',
+        headers: { 'accept-encoding': 'identity' }
+      })
+      const pair = String(upstream.headers.get('set-cookie') || '').split(';')[0]
+      if (!pair.includes('=')) {
+        this.log(`Harness auth exchange returned no cookie (status ${upstream.status})`)
+        return false
+      }
+      this.harnessCookie = pair
+      this.harnessToken = token
+      this.log(`Harness auth cookie acquired (status ${upstream.status})`)
+      return true
+    } catch (error) {
+      this.log(`Harness auth exchange failed: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Re-acquire the harness cookie after the upstream rejected it.
+   *
+   * Serialised: many concurrent 401s must not each start a memory scan. The
+   * cache is invalidated first so an attempt during a harness restart is not
+   * pinned to the dead cookie forever.
+   */
+  async refreshHarnessAuth() {
+    if (this.harnessAuthRetry !== null) return this.harnessAuthRetry
+    this.harnessCookie = null
+    this.harnessAuthRetry = (async () => {
+      try {
+        // The provider can rescan memory for a rotated token; without one, a
+        // restart makes the cached token useless and reusing it merely fails.
+        let token = this.harnessToken
+        if (this.harnessTokenProvider !== null) {
+          try {
+            token = await this.harnessTokenProvider()
+          } catch (error) {
+            this.log(`Harness token refresh failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        if (typeof token !== 'string' || token.length === 0) return false
+        this.log('Harness rejected the cached cookie; re-authenticating.')
+        return await this.authenticateHarness(token)
+      } finally {
+        this.harnessAuthRetry = null
+      }
+    })()
+    return this.harnessAuthRetry
+  }
+
+  async start(harnessUrl, harnessToken) {
     if (this.server !== null) return this.getStatus()
     this.harnessUrl = harnessUrl
+    await this.authenticateHarness(harnessToken)
     this.proxy = httpProxy.createProxyServer({ ws: true, xfwd: false, secure: true })
+    // A harness restart rotates the token and invalidates the cached cookie. When
+    // that happens the upstream answers 401; refresh once for the following
+    // request instead of leaving every phone stuck on the auth-required page.
+    this.proxy.on('proxyRes', (proxyRes) => {
+      if (proxyRes.statusCode === 401) void this.refreshHarnessAuth()
+    })
     this.proxy.on('error', (error, _request, responseOrSocket) => {
       this.log(`Remote proxy error: ${error.stack || error.message}`)
       if (responseOrSocket && typeof responseOrSocket.writeHead === 'function' && !responseOrSocket.headersSent) {
@@ -2322,7 +2407,10 @@ class RemoteGateway extends EventEmitter {
 
   prepareProxyRequest(request) {
     const target = new URL(this.harnessUrl)
-    delete request.headers.cookie
+    // Present the harness's own cookie; a paired device's cookie is meaningless
+    // upstream and must not be forwarded.
+    if (this.harnessCookie === null) delete request.headers.cookie
+    else request.headers.cookie = this.harnessCookie
     delete request.headers['tailscale-user-login']
     delete request.headers['tailscale-user-name']
     delete request.headers['tailscale-user-profile-pic']
@@ -2335,7 +2423,10 @@ class RemoteGateway extends EventEmitter {
     const target = new URL(request.url || '/', this.harnessUrl)
     const headers = { ...request.headers }
     delete headers.host
-    delete headers.cookie
+    // Same as prepareProxyRequest: the upstream needs the harness cookie, not
+    // whatever the device presented.
+    if (this.harnessCookie === null) delete headers.cookie
+    else headers.cookie = this.harnessCookie
     delete headers.connection
     delete headers.upgrade
     delete headers['content-length']

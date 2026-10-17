@@ -414,6 +414,120 @@ async function main() {
     gateway.revokeDevice(deviceId)
     const revoked = await fetch(base, { headers: { Cookie: cookie, Origin: 'https://desktop.test.ts.net:8443', 'X-DSH-Test-Identity': 'owner@example.com' } })
     assert.equal(revoked.status, 401)
+
+    // --- harness authentication ---------------------------------------------
+    // DSH 0.1.5+ answers an unauthenticated loopback request with 401. The
+    // gateway must exchange the startup token for its own cookie and present it
+    // upstream, or every paired phone sees the "authentication required" page
+    // instead of the interface.
+    {
+      const fakeHarness = http.createServer((request, response) => {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+        if (url.pathname === '/' && url.searchParams.get('token') === 'good-token') {
+          response.writeHead(303, { 'set-cookie': 'dsh-auth-test=abc123; Path=/; HttpOnly' })
+          response.end()
+          return
+        }
+        const cookie = String(request.headers.cookie ?? '')
+        if (!cookie.includes('dsh-auth-test=')) {
+          response.writeHead(401, { 'content-type': 'text/plain' })
+          response.end('dsh web authentication required; reopen the URL printed by dsh web.')
+          return
+        }
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.end('<title>DeepSeek Harness</title>')
+      })
+      await new Promise((resolve) => fakeHarness.listen(0, '127.0.0.1', resolve))
+
+      const authGateway = new RemoteGateway({
+        userDataPath: mkdtempSync(path.join(os.tmpdir(), 'dsh-auth-')),
+        skipTunnel: true,
+        log: () => {}
+      })
+      authGateway.harnessUrl = `http://127.0.0.1:${fakeHarness.address().port}`
+
+      // No token: no cookie, and no exception.
+      assert.equal(await authGateway.authenticateHarness(''), false)
+      assert.equal(authGateway.harnessCookie, null)
+
+      // A rejected token must not be stored as if it worked.
+      assert.equal(await authGateway.authenticateHarness('wrong-token'), false)
+      assert.equal(authGateway.harnessCookie, null)
+
+      // A good token is exchanged and kept.
+      assert.equal(await authGateway.authenticateHarness('good-token'), true)
+      assert.equal(authGateway.harnessCookie, 'dsh-auth-test=abc123')
+
+      // The harness cookie must reach the harness, and the paired device's own
+      // cookie must not leak upstream.
+      const proxied = { headers: { cookie: 'dsh-device-session=should-not-leak' } }
+      authGateway.prepareProxyRequest(proxied)
+      assert.equal(proxied.headers.cookie, 'dsh-auth-test=abc123')
+      assert.equal(proxied.headers.host, `127.0.0.1:${fakeHarness.address().port}`)
+
+      await new Promise((resolve) => fakeHarness.close(resolve))
+    }
+
+    // --- self-healing after a harness restart -------------------------------
+    // A restart rotates the token, so the cached cookie starts failing. The
+    // gateway must recover on its own rather than leaving every phone on the
+    // auth-required page until the companion is restarted.
+    {
+      let providerCalls = 0
+      let rejectToken = false
+      const fakeHarness = http.createServer((request, response) => {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+        const token = url.searchParams.get('token')
+        if (url.pathname === '/' && token === 'fresh-token' && !rejectToken) {
+          response.writeHead(303, { 'set-cookie': 'dsh-auth-fresh=ok; Path=/' })
+          response.end()
+          return
+        }
+        response.writeHead(401, { 'content-type': 'text/plain' })
+        response.end('dsh web authentication required')
+      })
+      await new Promise((resolve) => fakeHarness.listen(0, '127.0.0.1', resolve))
+
+      const healGateway = new RemoteGateway({
+        userDataPath: mkdtempSync(path.join(os.tmpdir(), 'dsh-heal-')),
+        skipTunnel: true,
+        log: () => {},
+        harnessTokenProvider: async () => {
+          providerCalls += 1
+          return 'fresh-token'
+        }
+      })
+      healGateway.harnessUrl = `http://127.0.0.1:${fakeHarness.address().port}`
+
+      // A dead cookie is dropped and replaced using a freshly supplied token.
+      healGateway.harnessCookie = 'dsh-auth-stale=dead'
+      healGateway.harnessToken = 'old-token'
+      assert.equal(await healGateway.refreshHarnessAuth(), true)
+      assert.equal(healGateway.harnessCookie, 'dsh-auth-fresh=ok')
+      assert.equal(providerCalls, 1)
+
+      // Concurrent 401s must not each start a refresh.
+      healGateway.harnessCookie = null
+      providerCalls = 0
+      await Promise.all([healGateway.refreshHarnessAuth(), healGateway.refreshHarnessAuth(), healGateway.refreshHarnessAuth()])
+      assert.ok(providerCalls <= 1, `provider called ${providerCalls} times for concurrent refreshes`)
+
+      // A provider failure must not throw; the next request can try again.
+      rejectToken = true
+      healGateway.harnessCookie = null
+      const failed = await (async () => {
+        try {
+          return await healGateway.refreshHarnessAuth()
+        } catch {
+          return 'threw'
+        }
+      })()
+      assert.notEqual(failed, 'threw', 'a failed refresh must not throw')
+      assert.equal(healGateway.harnessCookie, null)
+
+      await new Promise((resolve) => fakeHarness.close(resolve))
+    }
+
     console.log('remote-gateway-auth-proxy-desktop-test-ok')
   } finally {
     await gateway.stop(false)
