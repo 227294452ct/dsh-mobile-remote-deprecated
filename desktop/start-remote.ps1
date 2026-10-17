@@ -52,6 +52,26 @@ function Get-HttpStatus([string]$Uri) {
   }
 }
 
+# Verify the public address, preferring IPv6.
+#
+# A local VPN or TUN-mode proxy commonly breaks IPv4 TLS to Cloudflare while
+# leaving IPv6 intact (and vice versa). Probing only one family reports a healthy
+# tunnel as dead, so both are tried with a short deadline before giving up.
+function Get-PublicStatus([string]$Uri) {
+  $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+  if (-not (Test-Path -LiteralPath $curl)) { return Get-HttpStatus -Uri $Uri }
+  foreach ($family in @('-6', '-4')) {
+    try {
+      $code = & $curl $family -s -o NUL -w '%{http_code}' --max-time 12 $Uri 2>$null
+      $value = 0
+      if ([int]::TryParse([string]$code, [ref]$value) -and $value -ne 0) { return $value }
+    } catch {
+      # Try the other address family.
+    }
+  }
+  return $null
+}
+
 # --- uninstall path ---------------------------------------------------------
 
 if ($UninstallAutoStart) {
@@ -183,7 +203,7 @@ Write-Host 'Waiting for the tunnel to register...'
 $status = $null
 for ($attempt = 1; $attempt -le 30; $attempt += 1) {
   Start-Sleep -Milliseconds 1000
-  $status = Get-HttpStatus -Uri "https://$Hostname/"
+  $status = Get-PublicStatus -Uri "https://$Hostname/"
   # 502/530 mean the edge cannot reach the tunnel yet; anything else is a real answer.
   if ($null -ne $status -and $status -ne 502 -and $status -ne 530) { break }
 }

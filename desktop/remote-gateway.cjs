@@ -1456,6 +1456,12 @@ class RemoteGateway extends EventEmitter {
       : null
     this.harnessToken = null
     this.harnessAuthRetry = null
+    // Transport for the named tunnel. Defaults to HTTP/2 because QUIC (UDP) is
+    // frequently broken behind VPNs and proxies, and the failure mode is a tunnel
+    // that retries forever with the public address answering 530.
+    this.tunnelProtocol = options.tunnelProtocol
+      || process.env.DSH_TUNNEL_PROTOCOL
+      || 'http2'
     this.pairings = new Map()
     this.challenges = new Map()
     this.sessions = new Map()
@@ -1716,7 +1722,11 @@ class RemoteGateway extends EventEmitter {
       let output = ''
       const child = spawn(
         this.cloudflaredPath,
-        ['tunnel', '--no-autoupdate', '--config', this.namedTunnelConfigPath, 'run'],
+        // QUIC is cloudflared's default, but it rides UDP and VPN/proxy stacks
+        // routinely intercept or drop it: the tunnel then retries forever while
+        // the public address answers 530. HTTP/2 over TCP 443 survives those
+        // networks, and the quick tunnel has always used it for this reason.
+        ['tunnel', '--no-autoupdate', '--protocol', this.tunnelProtocol, '--config', this.namedTunnelConfigPath, 'run'],
         { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] }
       )
       this.tunnelProcess = child
