@@ -26,6 +26,62 @@ const TUNNEL_RETRY_BASE_DELAY_MS = 1_500
 const TUNNEL_RETRY_MAX_DELAY_MS = 30_000
 const PUBLIC_TUNNEL_IDENTITY = '内置安全隧道'
 const MOBILE_COMPAT_PATH = '/_dsh_remote/compat.js'
+
+/**
+ * Report a blank page's real cause instead of showing nothing.
+ *
+ * A white screen means the document loaded but the renderer never booted, and in
+ * an Android WebView that failure is completely silent — no console, no way to
+ * ask the user what happened. This catches script errors, unhandled rejections
+ * and failed sub-resource loads, and paints them into the page so the user can
+ * photograph them.
+ *
+ * It is deliberately dependency-free and idempotent, and it hides itself again as
+ * soon as the app renders something real, so a healthy page never shows it.
+ */
+const BOOT_DIAGNOSTIC_SCRIPT = `<script>
+(function () {
+  var shown = false;
+  function paint(title, detail) {
+    try {
+      if (shown || document.getElementById('__dsh_boot_diag')) return;
+      if ((document.body && document.body.childElementCount > 0) === false) { /* still empty */ }
+      shown = true;
+      var id = '__dsh_boot_diag';
+      var box = document.createElement('pre');
+      box.id = id;
+      box.style.cssText = 'position:fixed;z-index:2147483647;left:0;right:0;top:0;max-height:60vh;overflow:auto;margin:0;padding:12px;background:#1b1b1b;color:#ff8080;font:12px/1.5 monospace;white-space:pre-wrap;';
+      box.textContent = '页面没能启动\\n\\n' + title + '\\n\\n' + detail;
+      var attach = function () {
+        if (document.body) { document.body.appendChild(box); }
+        else { document.addEventListener('DOMContentLoaded', function () { document.body && document.body.appendChild(box); }); }
+      };
+      attach();
+    } catch (e) {}
+  }
+  window.addEventListener('error', function (event) {
+    var target = event.target;
+    if (target && target !== window && (target.src || target.href)) {
+      paint('资源加载失败', String(target.src || target.href));
+      return;
+    }
+    paint('脚本错误', (event.message || '') + '\\n' + (event.filename || '') + ':' + (event.lineno || 0));
+  }, true);
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    paint('未处理的 Promise 拒绝', (reason && (reason.stack || reason.message)) || String(reason));
+  });
+  // Only report a blank page: if the app rendered anything, say nothing.
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      var root = document.getElementById('root') || document.body;
+      var visible = root && (root.innerText || '').trim().length > 0;
+      if (!visible) paint('页面加载完成但内容为空', 'WebView 可能不支持页面所需的特性，或后端未就绪。');
+    }, 8000);
+  });
+})();
+</script>`
+
 const DESKTOP_SOCKET_PATH = `${API_PREFIX}/desktop/socket`
 const DESKTOP_MESSAGE_BYTES = 4 * 1024
 const DESKTOP_FRAME_INTERVAL_MS = Math.ceil(1000 / 10)
@@ -2564,7 +2620,10 @@ class RemoteGateway extends EventEmitter {
     let output = body
     if (contentType.toLowerCase().includes('text/html')) {
       const html = body.toString('utf8')
-      const tag = `<script src="${MOBILE_COMPAT_PATH}"></script>`
+      // Inline, because an external script is itself a request that can fail — and
+      // the case being diagnosed is a blank page where nothing else loads. Without
+      // this a failure inside the Android WebView is completely silent.
+      const tag = `${BOOT_DIAGNOSTIC_SCRIPT}<script src="${MOBILE_COMPAT_PATH}"></script>`
       const patched = /<head(?:\s[^>]*)?>/i.test(html)
         ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${tag}`)
         : `${tag}${html}`

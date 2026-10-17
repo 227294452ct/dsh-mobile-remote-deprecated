@@ -8,7 +8,7 @@
   "scripts": {
     "prepare:cloudflared": "node scripts/prepare-cloudflared.cjs",
     "start": "electron .",
-    "test": "node test-startup-options.cjs && node test-tray-menu.cjs && node test-tunnel-watchdog.cjs && node test-input-helper.cjs && node test-remote-gateway.cjs && electron test-mobile-layout.cjs",
+    "test": "node test-startup-options.cjs && node test-tray-menu.cjs && node test-tunnel-watchdog.cjs && node test-boot-diagnostic.cjs && node test-input-helper.cjs && node test-remote-gateway.cjs && electron test-mobile-layout.cjs",
     "test:layout": "electron test-mobile-layout.cjs",
     "test:ui": "electron test-remote-ui.cjs",
     "dist": "npm run prepare:cloudflared && electron-builder --win nsis portable --x64"
