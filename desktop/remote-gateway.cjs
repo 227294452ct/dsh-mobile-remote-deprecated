@@ -17,6 +17,11 @@ const CHALLENGE_TTL_MS = 60_000
 const SESSION_TTL_MS = 60 * 60_000
 const MAX_JSON_BYTES = 1024 * 1024
 const TUNNEL_START_TIMEOUT_MS = 45_000
+// How long the tunnel may have zero edge connections before it is restarted.
+// Long enough to ride out a VPN/proxy blip and cloudflared's own reconnect, short
+// enough that a phone user does not sit on a dead address.
+const TUNNEL_STALE_MS = 90_000
+const TUNNEL_RESTART_DELAY_MS = 2_000
 const TUNNEL_RETRY_BASE_DELAY_MS = 1_500
 const TUNNEL_RETRY_MAX_DELAY_MS = 30_000
 const PUBLIC_TUNNEL_IDENTITY = '内置安全隧道'
@@ -1434,6 +1439,12 @@ class RemoteGateway extends EventEmitter {
     this.tunnelError = ''
     this.tunnelRetryTimer = null
     this.tunnelRetryAttempt = 0
+    // Connection-set tracking for the tunnel watchdog: cloudflared stays alive
+    // while its edge connections drop, so process liveness proves nothing.
+    this.tunnelWatchdog = null
+    this.tunnelConnections = new Set()
+    this.tunnelLastAliveAt = 0
+    this.tunnelRestarting = false
     this.server = null
     this.proxy = null
     this.gatewayPort = null
@@ -1743,9 +1754,11 @@ class RemoteGateway extends EventEmitter {
       const consume = (chunk) => {
         const text = chunk.toString('utf8')
         this.log(`Tunnel: ${text.trim()}`)
+        this.trackTunnelLine(text)
         output = `${output}${text}`.slice(-65_536)
         if (registered()) {
           this.tunnelState = 'Connected'
+          this.startTunnelWatchdog()
           finish(null, namedTunnelUrl(tunnel.hostname))
         }
       }
@@ -1784,6 +1797,96 @@ class RemoteGateway extends EventEmitter {
     })
   }
 
+  /**
+   * Track tunnel connections and restart cloudflared when they all drop.
+   *
+   * cloudflared keeps the process alive and retries internally, so a VPN blip can
+   * leave it running while every edge connection is gone: the public address then
+   * answers 530 and phones time out, with nothing looking wrong locally. The
+   * watchdog watches the connection set rather than the process, and restarts it
+   * once the set has been empty long enough to be a real failure rather than a
+   * reconnect.
+   */
+  startTunnelWatchdog() {
+    this.stopTunnelWatchdog()
+    this.tunnelConnections = new Set()
+    this.tunnelLastAliveAt = Date.now()
+
+    this.tunnelWatchdog = setInterval(() => {
+      if (this.server === null || this.tunnelProcess === null) return
+      if (this.tunnelConnections.size > 0) {
+        this.tunnelLastAliveAt = Date.now()
+        return
+      }
+      const deadFor = Date.now() - this.tunnelLastAliveAt
+      if (deadFor < TUNNEL_STALE_MS) return
+      this.log(`安全隧道 ${Math.round(deadFor / 1000)}s 无可用连接，正在重启。`)
+      this.restartTunnel()
+    }, 15_000)
+    this.tunnelWatchdog.unref?.()
+  }
+
+  stopTunnelWatchdog() {
+    if (this.tunnelWatchdog !== null) {
+      clearInterval(this.tunnelWatchdog)
+      this.tunnelWatchdog = null
+    }
+  }
+
+  /** Records one cloudflared log line into the connection-set tracker. */
+  trackTunnelLine(text) {
+    for (const match of text.matchAll(/Registered tunnel connection\b[^\n]*?connIndex=(\d+)/g)) {
+      if (this.tunnelConnections !== null) this.tunnelConnections.add(match[1])
+      this.tunnelLastAliveAt = Date.now()
+    }
+    for (const match of text.matchAll(/(?:Unregistered tunnel connection|Connection terminated)\b[^\n]*?connIndex=(\d+)/g)) {
+      this.tunnelConnections?.delete(match[1])
+    }
+    // A line without a connIndex that still reports registration (older formats).
+    if (/Registered tunnel connection/.test(text) && !/connIndex=/.test(text)) {
+      this.tunnelConnections?.add('0')
+      this.tunnelLastAliveAt = Date.now()
+    }
+  }
+
+  /** Kill the current tunnel and start it again, with the state machine intact. */
+  restartTunnel() {
+    if (this.tunnelRestarting) return
+    this.tunnelRestarting = true
+    const child = this.tunnelProcess
+    this.tunnelProcess = null
+    this.stopTunnelWatchdog()
+    if (child !== null) {
+      try {
+        child.kill()
+      } catch {
+        // Already gone.
+      }
+    }
+    this.remoteUrl = null
+    this.tunnelState = 'Connecting'
+    this.emit('status', this.getStatus())
+    setTimeout(() => {
+      this.tunnelRestarting = false
+      // start() is a no-op when a server is already listening, so re-enter the
+      // tunnel phase directly.
+      const startTunnel = this.namedTunnel !== null ? this.startNamedTunnel() : this.startPublicTunnel()
+      Promise.resolve(startTunnel)
+        .then((url) => {
+          this.remoteUrl = url
+          this.tunnelState = 'Connected'
+          this.emit('status', this.getStatus())
+        })
+        .catch((error) => {
+          this.tunnelState = 'Retrying'
+          this.tunnelError = error instanceof Error ? error.message : String(error)
+          this.log(`安全隧道重启失败：${this.tunnelError}`)
+          this.scheduleTunnelRetry()
+          this.emit('status', this.getStatus())
+        })
+    }, TUNNEL_RESTART_DELAY_MS)
+  }
+
   startPublicTunnel() {
     if (!existsSync(this.cloudflaredPath)) throw new Error('桌面端缺少内置安全隧道组件。')
     this.tunnelState = 'Connecting'
@@ -1806,10 +1909,12 @@ class RemoteGateway extends EventEmitter {
       const consume = (chunk) => {
         const text = chunk.toString('utf8')
         this.log(`Tunnel: ${text.trim()}`)
+        this.trackTunnelLine(text)
         output = `${output}${text}`.slice(-65_536)
         const tunnelUrl = extractQuickTunnelUrl(output)
         if (tunnelUrl) {
           this.tunnelState = 'Connected'
+          this.startTunnelWatchdog()
           finish(null, tunnelUrl)
         }
       }
@@ -1849,6 +1954,8 @@ class RemoteGateway extends EventEmitter {
   }
 
   async stop(disableServe = true) {
+    this.stopTunnelWatchdog()
+    this.tunnelConnections = new Set()
     if (this.tunnelRetryTimer !== null) clearTimeout(this.tunnelRetryTimer)
     this.tunnelRetryTimer = null
     this.tunnelRetryAttempt = 0
